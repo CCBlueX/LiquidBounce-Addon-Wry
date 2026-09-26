@@ -28,8 +28,28 @@ repositories {
     }
 }
 
+// `./gradlew runClientGameTest` starts the client with the add-on and runs src/gametest.
 loom {
-    accessWidenerPath = file("src/main/resources/example-addon.accesswidener")
+    accessWidenerPath = file("src/main/resources/liquidbounce-wry.accesswidener")
+}
+
+fabricApi {
+    configureTests {
+        createSourceSet = true
+        modId = "liquidbounce-wry-gametest"
+        enableGameTests = false
+    }
+}
+
+loom.runs.named("clientGameTest") {
+    // A loader error would otherwise wait on a dialog nobody sees; the client's own fatal errors go to
+    // the log when CI is set.
+    systemProperties.put("fabric.noGui", "true")
+    environmentVars.put("CI", "true")
+}
+
+tasks.named<JavaExec>("runClientGameTest") {
+    maxHeapSize = "4G"
 }
 
 // Two things to leave alone here:
@@ -49,6 +69,8 @@ dependencies {
 
     // The client itself; there is no separate API artifact.
     implementation(libs.liquidbounce)
+    // The client ships it
+    compileOnly(libs.lwjgl.egl)
 }
 
 // Gradle keeps a resolved snapshot for a day; the client publishes one on every push to nextgen.
@@ -81,6 +103,52 @@ tasks.processResources {
     }
 }
 
+// The native library goes into the jar under natives/<os>-<arch>/. CI builds it for every platform and passes the
+// directory with -Pnatives=<dir>; without it, the library is built with cargo for this machine only.
+val nativesDir = providers.gradleProperty("natives").map { file(it) }
+val hostPlatform = run {
+    val os = System.getProperty("os.name").lowercase()
+    val arch = when (System.getProperty("os.arch")) {
+        "amd64", "x86_64" -> "x64"
+        "aarch64", "arm64" -> "arm64"
+        else -> System.getProperty("os.arch")
+    }
+    when {
+        os.contains("win") -> "windows-$arch"
+        os.contains("mac") -> "macos-$arch"
+        else -> "linux-$arch"
+    }
+}
+val nativeLibrary = when {
+    hostPlatform.startsWith("windows") -> "liquidbounce_wry.dll"
+    hostPlatform.startsWith("macos") -> "libliquidbounce_wry.dylib"
+    else -> "libliquidbounce_wry.so"
+}
+
+val cargoBuild = tasks.register<Exec>("cargoBuild") {
+    description = "Builds the native library for this machine."
+    onlyIf { !nativesDir.isPresent }
+    workingDir = file("native")
+    commandLine("cargo", "build", "--release")
+    inputs.dir("native/src")
+    inputs.files("native/Cargo.toml", "native/Cargo.lock")
+    outputs.file("native/target/release/$nativeLibrary")
+}
+
+val collectNatives = tasks.register<Sync>("collectNatives") {
+    dependsOn(cargoBuild)
+    into(layout.buildDirectory.dir("natives"))
+    if (nativesDir.isPresent) {
+        from(nativesDir)
+    } else {
+        from("native/target/release/$nativeLibrary") { into(hostPlatform) }
+    }
+}
+
+tasks.processResources {
+    from(collectNatives) { into("natives") }
+}
+
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
     options.release = libs.versions.jdk.get().toInt()
@@ -99,6 +167,8 @@ kotlin {
         jvmToolchain(libs.versions.jdk.get().toInt())
         // LiquidBounce is compiled with preview features, which marks its classes as pre-release
         freeCompilerArgs.add("-Xskip-prerelease-check")
+        // As in LiquidBounce, whose API uses them
+        freeCompilerArgs.add("-Xcompanion-blocks-and-extensions")
     }
 }
 
