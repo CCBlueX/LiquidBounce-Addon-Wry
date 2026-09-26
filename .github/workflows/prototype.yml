@@ -14,11 +14,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            modes: offscreen snapshot child
+            modes: offscreen snapshot child nested
           - os: windows-2025
             modes: visual visual-window window preview
           - os: macos-15
-            modes: carenderer carenderer-alpha snapshot
+            modes: carenderer-alpha carenderer-rlt snapshot
+          - os: macos-26
+            modes: carenderer-alpha carenderer-rlt
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:

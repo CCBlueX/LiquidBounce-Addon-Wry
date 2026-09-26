@@ -22,6 +22,7 @@ raw-window-handle = "0.6"
 libc = "0.2"
 cairo = { version = "0.18", package = "cairo-rs" }
 glib = "0.18"
+smithay = { version = "0.7", default-features = false, features = ["wayland_frontend"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 webview2-com = "0.39"

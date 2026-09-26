@@ -56,13 +56,20 @@ pub fn run(mode: &str) {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     app.finishLaunching();
 
-    let on_screen = mode.ends_with("-alpha");
+    if mode.ends_with("-rlt") {
+        // WebKit then sends the page as IOSurface-backed layers into this process instead of a CALayerHost
+        let defaults = NSUserDefaults::standardUserDefaults();
+        defaults.setBool_forKey(true, &NSString::from_str("WebKit2UseRemoteLayerTreeDrawingArea"));
+    }
+    let on_screen = mode != "carenderer";
     let window = create_window(mtm, on_screen);
     let content = window.contentView().expect("content view");
     let parent = AppKitParent(NonNull::new(Retained::as_ptr(&content) as *mut c_void).unwrap());
     let webview = WebViewBuilder::new()
         .with_html(PAGE)
         .with_transparent(true)
+        // The first click would otherwise only activate the window, which never becomes key
+        .with_accept_first_mouse(true)
         .with_bounds(wry::Rect {
             position: wry::dpi::LogicalPosition::new(0, 0).into(),
             size: wry::dpi::LogicalSize::new(WIDTH, HEIGHT).into(),
@@ -83,7 +90,7 @@ pub fn run(mode: &str) {
     }
 
     match mode {
-        "carenderer" | "carenderer-alpha" => carenderer(&app, &window, &wk, mode),
+        "carenderer" | "carenderer-alpha" | "carenderer-rlt" => carenderer(&app, &window, &wk, mode),
         "snapshot" => snapshot(&app, &wk, mtm),
         _ => panic!("unknown mode {mode}"),
     }
@@ -245,14 +252,22 @@ fn input_check(app: &NSApplication, window: &ProbeWindow, wk: &WKWebView) {
     let uptime = || NSProcessInfo::processInfo().systemUptime();
     let number = window.windowNumber();
     window.makeFirstResponder(Some(wk));
+    // Straight to the view under the point, the window server never routes anything to this window
+    let content = window.contentView().unwrap();
     let click = |(x, y): (f64, f64)| {
-        for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+        let location = NSPoint::new(x, HEIGHT as f64 - y);
+        let target = content.hitTest(location).unwrap_or_else(|| content.clone());
+        for kind in [NSEventType::MouseMoved, NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
             let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                kind, NSPoint::new(x, HEIGHT as f64 - y), NSEventModifierFlags::empty(), uptime(), number, None, 0, 1, 1.0);
-            if let Some(event) = event {
-                window.sendEvent(&event);
+                kind, location, NSEventModifierFlags::empty(), uptime(), number, None, 0, 1, 1.0);
+            let Some(event) = event else { continue };
+            match kind {
+                NSEventType::MouseMoved => target.mouseMoved(&event),
+                NSEventType::LeftMouseDown => target.mouseDown(&event),
+                _ => target.mouseUp(&event),
             }
         }
+        println!("clicked {} at ({x}, {y})", target.class().name().to_string_lossy());
     };
     let settle = |ms: u64| {
         let until = Instant::now() + Duration::from_millis(ms);
@@ -269,8 +284,12 @@ fn input_check(app: &NSApplication, window: &ProbeWindow, wk: &WKWebView) {
         for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
             let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
                 kind, NSPoint::new(0.0, 0.0), NSEventModifierFlags::empty(), uptime(), number, None, &text, &text, false, key_code);
-            if let Some(event) = event {
-                window.sendEvent(&event);
+            let Some(event) = event else { continue };
+            let responder = window.firstResponder();
+            match (kind, responder) {
+                (NSEventType::KeyDown, Some(r)) => r.keyDown(&event),
+                (_, Some(r)) => r.keyUp(&event),
+                _ => {}
             }
         }
     }

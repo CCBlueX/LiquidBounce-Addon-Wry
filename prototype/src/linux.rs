@@ -19,6 +19,7 @@ pub fn run(mode: &str) {
         "offscreen" => offscreen(),
         "snapshot" => snapshot(),
         "child" => child(),
+        "nested" => crate::nested::run(),
         _ => panic!("unknown mode {mode}"),
     }
 }
@@ -308,14 +309,14 @@ fn child() {
 }
 
 /// CPU time of this process and of the WebKit processes it started.
-struct CpuSample {
+pub(crate) struct CpuSample {
     at: Instant,
     own: f64,
     children: f64,
 }
 
 impl CpuSample {
-    fn now() -> Self {
+    pub(crate) fn now() -> Self {
         let pid = std::process::id();
         let own = proc_cpu(pid).unwrap_or(0.0);
         let children = descendants(pid).into_iter().filter_map(proc_cpu).sum();
@@ -323,7 +324,7 @@ impl CpuSample {
     }
 
     /// Percent of one core since the sample was taken.
-    fn usage(&self) -> (f64, f64) {
+    pub(crate) fn usage(&self) -> (f64, f64) {
         let now = Self::now();
         let seconds = self.at.elapsed().as_secs_f64();
         ((now.own - self.own) / seconds * 100.0, (now.children - self.children) / seconds * 100.0)
@@ -455,4 +456,82 @@ fn type_text(wk: &webkit2gtk::WebView, text: &str) {
             }
         }
     }
+}
+
+/// Imports a dmabuf into a GL texture on its own EGL context, as the game would on its render thread,
+/// and reads the marker back from the GPU.
+pub fn import_dmabuf(fds: &[std::os::fd::OwnedFd], offsets: &[u32], strides: &[u32], fourcc: u32, modifier: u64,
+                     width: u32, height: u32) -> String {
+    use std::os::fd::AsRawFd;
+    let egl = match unsafe { khronos_egl::DynamicInstance::<khronos_egl::EGL1_5>::load_required() } {
+        Ok(egl) => egl,
+        Err(e) => return format!("no EGL 1.5: {e}"),
+    };
+    const PLATFORM_SURFACELESS_MESA: khronos_egl::Enum = 0x31DD;
+    let display = unsafe { egl.get_platform_display(PLATFORM_SURFACELESS_MESA, khronos_egl::DEFAULT_DISPLAY, &[khronos_egl::ATTRIB_NONE]) }
+        .or_else(|_| unsafe { egl.get_display(khronos_egl::DEFAULT_DISPLAY) }.ok_or(khronos_egl::Error::BadDisplay));
+    let Ok(display) = display else { return "no EGL display".into() };
+    if egl.initialize(display).is_err() {
+        return "eglInitialize failed".into();
+    }
+    egl.bind_api(khronos_egl::OPENGL_API).ok();
+    let Ok(Some(config)) = egl.choose_first_config(display, &[khronos_egl::RENDERABLE_TYPE, khronos_egl::OPENGL_BIT, khronos_egl::NONE]) else {
+        return "no EGL config".into();
+    };
+    let Ok(context) = egl.create_context(display, config, None, &[khronos_egl::NONE]) else { return "no EGL context".into() };
+    if egl.make_current(display, None, None, Some(context)).is_err() {
+        return "surfaceless make_current failed".into();
+    }
+
+    let mut attribs = vec![0x3057, width as i32, 0x3056, height as i32, 0x3271, fourcc as i32];
+    let plane_attribs = [(0x3272, 0x3273, 0x3274, 0x3443, 0x3444), (0x3275, 0x3276, 0x3277, 0x3445, 0x3446)];
+    for (i, fd) in fds.iter().enumerate().take(2) {
+        let (a_fd, a_offset, a_pitch, a_lo, a_hi) = plane_attribs[i];
+        attribs.extend([a_fd, fd.as_raw_fd(), a_offset, offsets[i] as i32, a_pitch, strides[i] as i32]);
+        if modifier != 0x00ff_ffff_ffff_ffff {
+            attribs.extend([a_lo, modifier as u32 as i32, a_hi, (modifier >> 32) as u32 as i32]);
+        }
+    }
+    attribs.push(0x3038);
+
+    type CreateImage = extern "system" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, u32, *mut std::ffi::c_void, *const i32) -> *mut std::ffi::c_void;
+    type TargetTexture = extern "system" fn(u32, *mut std::ffi::c_void);
+    type GenObjects = extern "system" fn(i32, *mut u32);
+    type Bind = extern "system" fn(u32, u32);
+    type FramebufferTexture = extern "system" fn(u32, u32, u32, u32, i32);
+    type ReadPixels = extern "system" fn(i32, i32, i32, i32, u32, u32, *mut u8);
+    macro_rules! proc {
+        ($name:literal, $ty:ty) => {
+            match egl.get_proc_address($name) {
+                Some(f) => unsafe { std::mem::transmute::<_, $ty>(f) },
+                None => return format!("{} missing", $name),
+            }
+        };
+    }
+    let create_image = proc!("eglCreateImageKHR", CreateImage);
+    let target_texture = proc!("glEGLImageTargetTexture2DOES", TargetTexture);
+    let gen_textures = proc!("glGenTextures", GenObjects);
+    let bind_texture = proc!("glBindTexture", Bind);
+    let gen_framebuffers = proc!("glGenFramebuffers", GenObjects);
+    let bind_framebuffer = proc!("glBindFramebuffer", Bind);
+    let framebuffer_texture = proc!("glFramebufferTexture2D", FramebufferTexture);
+    let read_pixels = proc!("glReadPixels", ReadPixels);
+
+    let started = Instant::now();
+    let image = create_image(display.as_ptr(), std::ptr::null_mut(), 0x3270, std::ptr::null_mut(), attribs.as_ptr());
+    if image.is_null() {
+        return format!("eglCreateImageKHR failed ({:?}), fourcc {fourcc:#x} modifier {modifier:#x}", egl.get_error());
+    }
+    let (mut texture, mut framebuffer) = (0, 0);
+    gen_textures(1, &mut texture);
+    bind_texture(0x0DE1, texture);
+    target_texture(0x0DE1, image);
+    let import_ms = ms(started);
+    gen_framebuffers(1, &mut framebuffer);
+    bind_framebuffer(0x8D40, framebuffer);
+    framebuffer_texture(0x8D40, 0x8CE0, 0x0DE1, texture, 0);
+    let mut pixel = [0u8; 4];
+    read_pixels(8, 8, 1, 1, 0x1908, 0x1401, pixel.as_mut_ptr());
+    format!("imported {width}x{height} fourcc {fourcc:#x} modifier {modifier:#x} in {import_ms:.2} ms without a copy, \
+        pixel at the marker {pixel:?} (expect red)")
 }
