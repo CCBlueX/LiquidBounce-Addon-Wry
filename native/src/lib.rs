@@ -8,6 +8,10 @@ pub mod script;
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::Engine;
+#[cfg(target_os = "windows")]
+mod win;
+#[cfg(target_os = "windows")]
+pub use win::Engine;
 
 use api::{BrowserOptions, Frame, Key, MouseButton, Pointer, StartOptions};
 use jni::objects::{JClass, JLongArray, JObject, JString};
