@@ -510,10 +510,25 @@ impl Browser {
             NSEventType::FlagsChanged => responder.flagsChanged(&event),
             NSEventType::KeyUp => responder.keyUp(&event),
             _ => {
-                // Command shortcuts are key equivalents, which views get before the key itself
-                let handled = key.modifiers & MOD_GUI != 0 && self.wk.performKeyEquivalent(&event);
-                if !handled {
-                    responder.keyDown(&event);
+                responder.keyDown(&event);
+                // What the Edit menu does in other apps, which the game has none of
+                if key.modifiers & MOD_GUI != 0 && key.modifiers & (MOD_CTRL | MOD_ALT) == 0 {
+                    let shift = key.modifiers & MOD_SHIFT != 0;
+                    let action = match (characters.as_str(), shift) {
+                        ("a", false) => Some(objc2::sel!(selectAll:)),
+                        ("c", false) => Some(objc2::sel!(copy:)),
+                        ("x", false) => Some(objc2::sel!(cut:)),
+                        ("v", false) => Some(objc2::sel!(paste:)),
+                        ("z", false) => Some(objc2::sel!(undo:)),
+                        ("z", true) => Some(objc2::sel!(redo:)),
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        let responds: bool = unsafe { msg_send![&*self.wk, respondsToSelector: action] };
+                        if responds {
+                            let _: () = unsafe { msg_send![&*self.wk, performSelector: action, withObject: std::ptr::null::<AnyObject>()] };
+                        }
+                    }
                 }
             }
         }

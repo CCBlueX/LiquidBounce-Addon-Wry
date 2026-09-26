@@ -20,6 +20,9 @@ html, body { margin: 0; background: transparent; font: 16px sans-serif; }
 <input id="text"><a id="link" href="#linked">a link</a>
 <script>
 console.log(`ready ${innerWidth}x${innerHeight}`);
+console.log(`active ${document.hasFocus()} ${document.visibilityState}`);
+let moves = 0;
+addEventListener('mousemove', (e) => { if (moves++ < 3) console.log(`mousemove:${e.clientX}:${e.clientY}`); });
 text.addEventListener('input', () => console.log('input:' + text.value));
 addEventListener('keydown', (e) => console.log(`keydown:${e.key}:${e.code}:${e.ctrlKey ? 'ctrl' : ''}${e.metaKey ? 'meta' : ''}`));
 addEventListener('mousedown', (e) => console.log(`mousedown:${e.button}:${e.clientX}:${e.clientY}`));
@@ -293,6 +296,9 @@ fn main() {
         let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
+        if std::env::var_os("WRY_ACTIVATE").is_some() {
+            app.activate();
+        }
     }
     let base = serve();
     let data_dir = std::env::temp_dir().join(format!("liquidbounce-wry-selftest-{}", std::process::id()));
