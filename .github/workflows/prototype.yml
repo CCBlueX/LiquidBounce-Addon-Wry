@@ -35,12 +35,14 @@ jobs:
         run: cargo build --release
       - name: Run probes
         run: |
+          # macOS has no timeout(1)
+          limit() { perl -e 'alarm shift; exec @ARGV' "$@"; }
           for mode in ${{ matrix.modes }}; do
             echo "::group::$mode"
             if [ "$RUNNER_OS" = Linux ]; then
-              timeout 120 xvfb-run -a -s "-screen 0 1920x1080x24" ./target/release/wry-probe "$mode" || echo "exit $?"
+              limit 120 xvfb-run -a -s "-screen 0 1920x1080x24" ./target/release/wry-probe "$mode" || echo "exit $?"
             else
-              timeout 120 ./target/release/wry-probe "$mode" || echo "exit $?"
+              limit 120 ./target/release/wry-probe "$mode" || echo "exit $?"
             fi
             echo "::endgroup::"
           done
