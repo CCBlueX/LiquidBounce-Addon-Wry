@@ -12,6 +12,10 @@ pub use linux::Engine;
 mod win;
 #[cfg(target_os = "windows")]
 pub use win::Engine;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::Engine;
 
 use api::{BrowserOptions, Frame, Key, MouseButton, Pointer, StartOptions};
 use jni::objects::{JClass, JLongArray, JObject, JString};
@@ -228,4 +232,12 @@ pub extern "system" fn Java_net_ccbluex_liquidbounce_wry_WryNative_takeFrame(mut
         env.set_long_array_region(&out, 0, &values).map_err(|e| e.to_string())?;
         Ok(kind)
     })
+}
+
+/// Binds an IOSurface to the rectangle texture bound on the game's OpenGL context, returns the CGL error.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "system" fn Java_net_ccbluex_liquidbounce_wry_WryNative_bindIoSurface(_env: JNIEnv, _: JClass, surface: jlong,
+    width: jint, height: jint) -> jint {
+    macos::bind_io_surface(surface, width, height)
 }
