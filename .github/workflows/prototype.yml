@@ -1,0 +1,53 @@
+name: Prototype
+
+# Phase 1 feasibility probes, see docs/feasibility.md
+on:
+  push:
+    branches: [ claude/liquidbounce-wry-addon-u72pzf ]
+    paths: [ 'prototype/**', '.github/workflows/prototype.yml' ]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            modes: offscreen snapshot child
+          - os: windows-2025
+            modes: visual visual-window window preview
+          - os: macos-15
+            modes: carenderer carenderer-alpha snapshot
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: prototype
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install WebKitGTK and Xvfb
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev xvfb libegl1 libegl-mesa0 imagemagick
+      - name: Build
+        run: cargo build --release
+      - name: Run probes
+        run: |
+          for mode in ${{ matrix.modes }}; do
+            echo "::group::$mode"
+            if [ "$RUNNER_OS" = Linux ]; then
+              timeout 120 xvfb-run -a -s "-screen 0 1920x1080x24" ./target/release/wry-probe "$mode" || echo "exit $?"
+            else
+              timeout 120 ./target/release/wry-probe "$mode" || echo "exit $?"
+            fi
+            echo "::endgroup::"
+          done
+      - name: Upload captures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: probe-${{ runner.os }}
+          path: prototype/out/
+          if-no-files-found: ignore
