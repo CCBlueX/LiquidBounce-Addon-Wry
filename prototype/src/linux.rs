@@ -175,6 +175,7 @@ fn offscreen() {
     }
 
     let upload_ms = Rc::new(RefCell::new(Vec::new()));
+    let window = window.clone();
     glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
         upload_ms.borrow_mut().extend(upload_times.try_iter());
         let mut stats = stats.borrow_mut();
@@ -201,7 +202,7 @@ fn offscreen() {
                 dump_frame("linux-offscreen", &frame.data, frame.width, frame.height, frame.stride, true);
             }
             stats.report(usage);
-            gtk::main_quit();
+            input_check(&window, &wk);
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
@@ -356,4 +357,102 @@ fn descendants(root: u32) -> Vec<u32> {
     }
     found.remove(0);
     found
+}
+
+/// Clicks the text field, types and clicks the button with GDK events handed to GTK directly, a moment apart
+/// like real input. The off-screen window is never focused by the window manager, it is only told it has focus.
+fn input_check(window: &gtk::OffscreenWindow, wk: &webkit2gtk::WebView) {
+    let wk = wk.clone();
+    focus(window, &wk);
+    click(&wk, INPUT_FIELD);
+    let after = |ms, f: Box<dyn FnOnce()>| glib::timeout_add_local_once(std::time::Duration::from_millis(ms), f);
+    let view = wk.clone();
+    after(300, Box::new(move || {
+        type_text(&view, INPUT_TEXT);
+        let view = view.clone();
+        after(300, Box::new(move || {
+            click(&view, INPUT_BUTTON);
+            let view = view.clone();
+            after(500, Box::new(move || {
+                let title = view.title().map(|t| t.to_string()).unwrap_or_default();
+                println!("input without focus: {} (title '{title}')", if input_ok(&title) { "ok" } else { "FAILED" });
+                gtk::main_quit();
+            }));
+        }));
+    }));
+}
+
+fn send(event: *mut gtk::gdk::ffi::GdkEvent) {
+    unsafe {
+        // GDK asks the X server about the pointer of the off-screen window, which it doesn't have
+        gtk::gdk::ffi::gdk_error_trap_push();
+        gtk::ffi::gtk_main_do_event(event);
+        gtk::gdk::ffi::gdk_event_free(event);
+        gtk::gdk::ffi::gdk_error_trap_pop_ignored();
+    }
+}
+
+fn seat() -> gtk::gdk::Seat {
+    gtk::gdk::Display::default().and_then(|display| display.default_seat()).expect("seat")
+}
+
+/// Tells the window it is the focused toplevel, so WebKit shows the caret and takes keys.
+fn focus(window: &gtk::OffscreenWindow, wk: &webkit2gtk::WebView) {
+    use gtk::gdk::ffi as gdk_ffi;
+    use gtk::glib::translate::ToGlibPtr;
+    GtkWindowExt::set_focus(window, Some(wk));
+    unsafe {
+        let focus = gdk_ffi::gdk_event_new(gdk_ffi::GDK_FOCUS_CHANGE);
+        (*focus).focus_change.window = WidgetExt::window(window).unwrap().to_glib_full();
+        (*focus).focus_change.in_ = 1;
+        gdk_ffi::gdk_event_set_device(focus, seat().keyboard().unwrap().to_glib_none().0);
+        send(focus);
+    }
+}
+
+fn click(wk: &webkit2gtk::WebView, (x, y): (f64, f64)) {
+    use gtk::gdk::ffi as gdk_ffi;
+    use gtk::glib::translate::ToGlibPtr;
+    let target = WidgetExt::window(wk).expect("GdkWindow");
+    let pointer = seat().pointer().unwrap();
+    for kind in [gdk_ffi::GDK_MOTION_NOTIFY, gdk_ffi::GDK_BUTTON_PRESS, gdk_ffi::GDK_BUTTON_RELEASE] {
+        unsafe {
+            let event = gdk_ffi::gdk_event_new(kind);
+            if kind == gdk_ffi::GDK_MOTION_NOTIFY {
+                let motion = &mut (*event).motion;
+                motion.window = target.to_glib_full();
+                (motion.x, motion.y, motion.time) = (x, y, gtk::current_event_time());
+            } else {
+                let button = &mut (*event).button;
+                button.window = target.to_glib_full();
+                (button.x, button.y, button.button, button.time) = (x, y, 1, gtk::current_event_time());
+            }
+            gdk_ffi::gdk_event_set_device(event, pointer.to_glib_none().0);
+            send(event);
+        }
+    }
+}
+
+fn type_text(wk: &webkit2gtk::WebView, text: &str) {
+    use gtk::gdk::ffi as gdk_ffi;
+    use gtk::glib::translate::ToGlibPtr;
+    let target = WidgetExt::window(wk).expect("GdkWindow");
+    let keyboard = seat().keyboard().unwrap();
+    let keymap = gtk::gdk::Keymap::for_display(&target.display()).expect("keymap");
+    for character in text.chars() {
+        let keyval = unsafe { gdk_ffi::gdk_unicode_to_keyval(character as u32) };
+        let keycode = keymap.entries_for_keyval(keyval.into()).first().map(|k| k.keycode()).unwrap_or(0);
+        for kind in [gdk_ffi::GDK_KEY_PRESS, gdk_ffi::GDK_KEY_RELEASE] {
+            unsafe {
+                let event = gdk_ffi::gdk_event_new(kind);
+                let key = &mut (*event).key;
+                key.window = target.to_glib_full();
+                key.keyval = keyval;
+                key.hardware_keycode = keycode as u16;
+                key.time = gtk::current_event_time();
+                gdk_ffi::gdk_event_set_device(event, keyboard.to_glib_none().0);
+                send(event);
+            }
+        }
+    }
 }
