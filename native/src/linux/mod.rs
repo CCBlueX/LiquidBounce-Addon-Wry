@@ -64,6 +64,10 @@ fn socket_path() -> api::Result<PathBuf> {
 impl Engine {
     pub fn start(options: StartOptions) -> api::Result<Self> {
         let socket = socket_path()?;
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
+            // WebKit's web processes start GTK themselves and need a display, only missing outside a desktop session
+            unsafe { std::env::set_var("WAYLAND_DISPLAY", &socket) };
+        }
         let slots = Slots::default();
         let render_node = options.render_node.filter(|_| options.gpu_frames);
         let mut compositor = Compositor::start(&socket, slots.clone(), render_node.as_deref(), options.formats)?;

@@ -32,15 +32,18 @@ fn serve() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     std::thread::spawn(move || {
+        // A connection each, browsers open some ahead of time that never send anything
         for stream in listener.incoming().flatten() {
-            let mut reader = BufReader::new(&stream);
-            let mut request = String::new();
-            reader.read_line(&mut request).ok();
-            while reader.read_line(&mut String::new()).map(|n| n > 2).unwrap_or(false) {}
-            let (status, body) = if request.starts_with("GET /missing") { ("404 Not Found", "missing") } else { ("200 OK", PAGE) };
-            let mut stream = &stream;
-            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()).ok();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(&stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                while reader.read_line(&mut String::new()).map(|n| n > 2).unwrap_or(false) {}
+                let (status, body) = if request.starts_with("GET /missing") { ("404 Not Found", "missing") } else { ("200 OK", PAGE) };
+                let mut stream = &stream;
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()).ok();
+            });
         }
     });
     format!("http://{address}")
@@ -105,36 +108,31 @@ impl Test {
         }
     }
 
-    /// Waits for a frame of the given size and copies its pixels out as BGRA rows.
-    fn frame(&mut self, browser: BrowserId, width: u32, height: u32) -> Option<Vec<u8>> {
+    /// Waits for a frame of the given size, or a multiple of it on a screen that scales, as BGRA rows.
+    fn frame(&mut self, browser: BrowserId, width: u32, height: u32) -> Option<Image> {
         let started = Instant::now();
+        let fits = |w: u32, h: u32| w >= width && w % width == 0 && h * width == w * height;
         while started.elapsed() < Duration::from_secs(10) {
             if let Some(frame) = self.engine.take_frame(browser) {
                 self.frames += 1;
-                match frame {
-                    Frame::Pixels { data, len, width: w, height: h, stride, bgra, flipped } if w == width && h == height => {
+                let image = match frame {
+                    Frame::Pixels { data, len, width: w, height: h, stride, bgra, flipped } if fits(w, h) => {
                         let data = unsafe { std::slice::from_raw_parts(data, len) };
-                        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
-                        for row in 0..h {
-                            let row = if flipped { h - 1 - row } else { row };
-                            let start = (row * stride) as usize;
-                            pixels.extend_from_slice(&data[start..start + (w * 4) as usize]);
-                        }
-                        if !bgra {
-                            pixels.chunks_exact_mut(4).for_each(|p| p.swap(0, 2));
-                        }
-                        println!("ok: {w}x{h} frame after {} ms", started.elapsed().as_millis());
-                        return Some(pixels);
+                        Some(Image::from_rows(data, w, h, stride as usize, bgra, flipped))
                     }
-                    Frame::Pixels { .. } => {}
                     Frame::DmaBuf { width, height, fourcc, modifier, .. } => {
                         println!("ok: dmabuf frame {width}x{height} fourcc {fourcc:#x} modifier {modifier:#x}");
                         return None;
                     }
-                    Frame::SharedTexture { width, height, .. } | Frame::IoSurface { width, height, .. } => {
-                        println!("ok: GPU frame {width}x{height}");
-                        return None;
-                    }
+                    Frame::SharedTexture { handle, width: w, height: h } if fits(w, h) => gpu::read_shared(handle, w, h),
+                    Frame::IoSurface { surface, width: w, height: h, flipped } if fits(w, h) =>
+                        gpu::read_surface(surface, w, h, flipped),
+                    _ => None,
+                };
+                if let Some(image) = image {
+                    println!("ok: {}x{} {} frame after {} ms", image.width, image.height, frame_kind(&frame),
+                        started.elapsed().as_millis());
+                    return Some(image.scaled_to(width));
                 }
             }
             self.pump();
@@ -143,12 +141,12 @@ impl Test {
         None
     }
 
-    fn save(&self, name: &str, pixels: &[u8], width: u32, height: u32) {
-        let mut rgba = pixels.to_vec();
+    fn save(&self, name: &str, image: &Image) {
+        let mut rgba = image.pixels.clone();
         rgba.chunks_exact_mut(4).for_each(|p| p.swap(0, 2));
         let path = self.out.join(format!("{name}.png"));
         let file = std::fs::File::create(&path).unwrap();
-        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), image.width, image.height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.write_header().unwrap().write_image_data(&rgba).unwrap();
@@ -170,19 +168,137 @@ impl Test {
     }
 }
 
-fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
-    let i = ((y * width + x) * 4) as usize;
-    [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+fn frame_kind(frame: &Frame) -> &'static str {
+    match frame {
+        Frame::Pixels { .. } => "memory",
+        Frame::DmaBuf { .. } => "dmabuf",
+        Frame::SharedTexture { .. } => "shared texture",
+        Frame::IoSurface { .. } => "IOSurface",
+    }
+}
+
+/// BGRA rows from the top, and how many of its pixels make one pixel of the page.
+struct Image {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    scale: u32,
+}
+
+impl Image {
+    fn from_rows(data: &[u8], width: u32, height: u32, stride: usize, bgra: bool, flipped: bool) -> Self {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height {
+            let row = if flipped { height - 1 - row } else { row };
+            let start = row as usize * stride;
+            pixels.extend_from_slice(&data[start..start + (width * 4) as usize]);
+        }
+        if !bgra {
+            pixels.chunks_exact_mut(4).for_each(|p| p.swap(0, 2));
+        }
+        Self { pixels, width, height, scale: 1 }
+    }
+
+    fn scaled_to(mut self, width: u32) -> Self {
+        self.scale = self.width / width;
+        self
+    }
+}
+
+fn pixel(image: &Image, x: u32, y: u32) -> [u8; 4] {
+    let i = (((y * image.scale) * image.width + x * image.scale) * 4) as usize;
+    [image.pixels[i], image.pixels[i + 1], image.pixels[i + 2], image.pixels[i + 3]]
+}
+
+/// Reads frames that stay on the GPU back into memory.
+mod gpu {
+    #[allow(unused_imports)]
+    use super::Image;
+
+    #[cfg(target_os = "windows")]
+    pub fn read_shared(handle: i64, width: u32, height: u32) -> Option<Image> {
+        use windows::core::Interface;
+        use windows::Win32::Foundation::{HANDLE, HMODULE};
+        use windows::Win32::Graphics::Direct3D::*;
+        use windows::Win32::Graphics::Direct3D11::*;
+        use windows::Win32::Graphics::Dxgi::Common::*;
+        unsafe {
+            let (mut device, mut context) = (None, None);
+            D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None,
+                D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context))
+                .or_else(|_| D3D11CreateDevice(None, D3D_DRIVER_TYPE_WARP, HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)))
+                .ok()?;
+            let (device, context) = (device?, context?);
+            let shared: ID3D11Texture2D = device.cast::<ID3D11Device1>().ok()?
+                .OpenSharedResource1(HANDLE(handle as _)).ok()?;
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut staging = None;
+            device.CreateTexture2D(&desc, None, Some(&mut staging)).ok()?;
+            let staging = staging?;
+            context.CopyResource(&staging, &shared);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
+            let data = std::slice::from_raw_parts(mapped.pData as *const u8, mapped.RowPitch as usize * height as usize);
+            let image = Image::from_rows(data, width, height, mapped.RowPitch as usize, true, false);
+            context.Unmap(&staging, 0);
+            Some(image)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn read_surface(surface: i64, width: u32, height: u32, flipped: bool) -> Option<Image> {
+        use objc2_io_surface::{IOSurfaceLockOptions, IOSurfaceRef};
+        let surface = unsafe { &*(surface as *const IOSurfaceRef) };
+        unsafe {
+            surface.lock(IOSurfaceLockOptions::ReadOnly, std::ptr::null_mut());
+            let stride = surface.bytes_per_row();
+            let data = std::slice::from_raw_parts(surface.base_address().as_ptr() as *const u8, stride * height as usize);
+            let image = Image::from_rows(data, width, height, stride, true, flipped);
+            surface.unlock(IOSurfaceLockOptions::ReadOnly, std::ptr::null_mut());
+            Some(image)
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn read_shared(_handle: i64, _width: u32, _height: u32) -> Option<Image> {
+        None
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn read_surface(_surface: i64, _width: u32, _height: u32, _flipped: bool) -> Option<Image> {
+        None
+    }
 }
 
 fn main() {
     let out = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "selftest-out".into()));
+    let gpu_frames = std::env::args().nth(2).as_deref() == Some("gpu");
     std::fs::create_dir_all(&out).unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        // What SDL does for the game
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+        let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        app.finishLaunching();
+    }
     let base = serve();
     let data_dir = std::env::temp_dir().join(format!("liquidbounce-wry-selftest-{}", std::process::id()));
 
     let started = Instant::now();
-    let engine = match Engine::start(StartOptions { data_dir: data_dir.clone(), gpu_frames: false, render_node: None, formats: Vec::new() }) {
+    let engine = match Engine::start(StartOptions { data_dir: data_dir.clone(), gpu_frames, render_node: None, formats: Vec::new() }) {
         Ok(engine) => engine,
         Err(error) => {
             println!("FAILED: start: {error}");
@@ -202,19 +318,19 @@ fn main() {
     test.console(&format!("ready {width}x{height}"));
     test.wait_for("console warning", Duration::from_secs(5), |e| e.kind == EventKind::Console && e.code == 2);
 
-    if let Some(pixels) = test.frame(browser, width, height) {
+    if let Some(image) = test.frame(browser, width, height) {
         // Let the page settle, then take the newest frame
         let until = Instant::now() + Duration::from_millis(500);
         while Instant::now() < until {
             test.pump();
         }
-        let pixels = test.frame(browser, width, height).unwrap_or(pixels);
-        test.save("frame", &pixels, width, height);
-        let marker = pixel(&pixels, width, 10, 10);
+        let image = test.frame(browser, width, height).unwrap_or(image);
+        test.save("frame", &image);
+        let marker = pixel(&image, 10, 10);
         test.check(marker == [0, 0, 255, 255], format!("marker pixel is red: {marker:?}"));
-        let background = pixel(&pixels, width, 700, 500);
+        let background = pixel(&image, 700, 500);
         test.check(background[3] == 0, format!("background is transparent: {background:?}"));
-        let panel = pixel(&pixels, width, 500, 150);
+        let panel = pixel(&image, 500, 150);
         test.check((120..=136).contains(&panel[3]) && panel[0] >= 120 && panel[2] == 0,
             format!("half transparent panel is premultiplied blue: {panel:?}"));
     }
@@ -264,16 +380,16 @@ fn main() {
     // Half the texture at half the zoom keeps the layout
     test.engine.resize(browser, 400, 300, 0.5);
     test.console("resize 800x600");
-    if let Some(pixels) = test.frame(browser, 400, 300) {
+    if let Some(image) = test.frame(browser, 400, 300) {
         let until = Instant::now() + Duration::from_millis(300);
         while Instant::now() < until {
             test.pump();
         }
-        let pixels = test.frame(browser, 400, 300).unwrap_or(pixels);
-        test.save("resized", &pixels, 400, 300);
-        let marker = pixel(&pixels, 400, 20, 20);
+        let image = test.frame(browser, 400, 300).unwrap_or(image);
+        test.save("resized", &image);
+        let marker = pixel(&image, 20, 20);
         test.check(marker == [0, 0, 255, 255], format!("marker at half size: {marker:?}"));
-        let outside = pixel(&pixels, 400, 40, 40);
+        let outside = pixel(&image, 40, 40);
         test.check(outside[3] == 0, format!("marker ends at 32 px: {outside:?}"));
     }
     test.engine.resize(browser, width, height, 1.0);
