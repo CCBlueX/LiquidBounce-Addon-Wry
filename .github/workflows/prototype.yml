@@ -16,11 +16,11 @@ jobs:
           - os: ubuntu-24.04
             modes: offscreen snapshot child nested
           - os: windows-2025
-            modes: visual visual-window window preview
+            modes: visual preview
           - os: macos-15
-            modes: carenderer-alpha carenderer-rlt snapshot
+            modes: carenderer-rlt carenderer-rlt-offscreen snapshot snapshot-rlt
           - os: macos-26
-            modes: carenderer-alpha carenderer-rlt
+            modes: carenderer-alpha carenderer-rlt carenderer-rlt-offscreen snapshot-rlt
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:

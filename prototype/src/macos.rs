@@ -56,12 +56,18 @@ pub fn run(mode: &str) {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     app.finishLaunching();
 
-    if mode.ends_with("-rlt") {
-        // WebKit then sends the page as IOSurface-backed layers into this process instead of a CALayerHost
-        let defaults = NSUserDefaults::standardUserDefaults();
-        defaults.setBool_forKey(true, &NSString::from_str("WebKit2UseRemoteLayerTreeDrawingArea"));
+    let remote_layer_tree = mode.contains("-rlt");
+    {
+        // WebKit then sends the page as IOSurface-backed layers into this process instead of a CALayerHost.
+        // The registration domain is never written to disk.
+        let key = NSString::from_str("WebKit2UseRemoteLayerTreeDrawingArea");
+        let value = NSNumber::new_bool(remote_layer_tree);
+        let value: &AnyObject = unsafe { &*(Retained::as_ptr(&value) as *const AnyObject) };
+        let defaults = NSDictionary::<NSString, AnyObject>::from_slices(&[&*key], &[value]);
+        unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+        NSUserDefaults::standardUserDefaults().removeObjectForKey(&key);
     }
-    let on_screen = mode != "carenderer";
+    let on_screen = !mode.ends_with("-offscreen") && mode != "carenderer";
     let window = create_window(mtm, on_screen);
     let content = window.contentView().expect("content view");
     let parent = AppKitParent(NonNull::new(Retained::as_ptr(&content) as *mut c_void).unwrap());
@@ -77,6 +83,15 @@ pub fn run(mode: &str) {
         .build_as_child(&parent)
         .expect("webview");
     let wk: Retained<WKWebView> = Retained::into_super(webview.webview());
+    if !on_screen {
+        // WebKit stops rendering pages in windows it thinks nobody sees
+        let selector = objc2::sel!(_setWindowOcclusionDetectionEnabled:);
+        let supported: bool = unsafe { msg_send![&*wk, respondsToSelector: selector] };
+        if supported {
+            let _: () = unsafe { msg_send![&*wk, _setWindowOcclusionDetectionEnabled: false] };
+        }
+        println!("window occlusion detection turned off: {supported}");
+    }
 
     // Lets the page load and paint before measuring
     let settle = Instant::now();
@@ -90,8 +105,8 @@ pub fn run(mode: &str) {
     }
 
     match mode {
-        "carenderer" | "carenderer-alpha" | "carenderer-rlt" => carenderer(&app, &window, &wk, mode),
-        "snapshot" => snapshot(&app, &wk, mtm),
+        m if m.starts_with("carenderer") => carenderer(&app, &window, &wk, mode),
+        m if m.starts_with("snapshot") => snapshot(&app, &wk, mtm),
         _ => panic!("unknown mode {mode}"),
     }
 }
@@ -113,16 +128,23 @@ fn create_window(mtm: MainThreadMarker, on_screen: bool) -> Retained<ProbeWindow
     window
 }
 
-/// What SDL does for the game once a frame: runs the main run loop until no event is left.
+/// What SDL does for the game once a frame, taking events until none is left, then handling whatever else
+/// waits on the main run loop, which WebKit's remote layer tree needs several passes of per frame.
 fn pump(app: &NSApplication) {
     while let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
         NSEventMask::Any, Some(&NSDate::distantPast()), unsafe { NSDefaultRunLoopMode }, true) {
         app.sendEvent(&event);
     }
+    let mode = unsafe { objc2_core_foundation::kCFRunLoopDefaultMode };
+    for _ in 0..64 {
+        if objc2_core_foundation::CFRunLoop::run_in_mode(mode, 0.0, true) != objc2_core_foundation::CFRunLoopRunResult::HandledSource {
+            break;
+        }
+    }
 }
 
 fn dump_layers(layer: &CALayer, depth: usize, printed: &mut usize) {
-    if *printed > 40 || depth > 8 {
+    if *printed > 80 || depth > 14 {
         return;
     }
     *printed += 1;
@@ -217,6 +239,11 @@ fn carenderer(app: &NSApplication, window: &ProbeWindow, wk: &WKWebView, mode: &
     let (pixels, stride) = read_surface(surface_ref);
     stats.notes.push(format!("{attempts} frames asked, IOSurface marker pixel ok: {}, background alpha: {}",
         marker_ok(&pixels, stride, true), background_alpha(&pixels, stride)));
+    stats.notes.push(describe(&pixels, stride));
+    if let Some(layer) = wk.layer() {
+        println!("layer tree after rendering:");
+        dump_layers(&layer, 0, &mut 0);
+    }
     dump_frame(&mode.replace('-', "_"), &pixels, WIDTH, HEIGHT, stride, true);
     let cpu = cpu_start.map(|(at, start): (Instant, f64)| ((cpu_seconds() - start) / at.elapsed().as_secs_f64() * 100.0, f64::NAN));
     stats.report(cpu);
@@ -362,4 +389,18 @@ fn snapshot(app: &NSApplication, wk: &WKWebView, mtm: MainThreadMarker) {
     }
     let cpu = cpu_start.map(|(at, start): (Instant, f64)| ((cpu_seconds() - start) / at.elapsed().as_secs_f64() * 100.0, f64::NAN));
     s.report(cpu);
+}
+
+/// Where the marker ended up and what a few pixels hold, to tell a flipped or scaled frame from an empty one.
+fn describe(pixels: &[u8], stride: usize) -> String {
+    let at = |x: usize, y: usize| {
+        let o = y * stride + x * 4;
+        [pixels[o + 2], pixels[o + 1], pixels[o], pixels[o + 3]]
+    };
+    let flipped = marker_ok(&pixels[(HEIGHT as usize - 17) * stride..], stride, true);
+    let opaque = (0..HEIGHT as usize).step_by(10)
+        .flat_map(|y| (0..WIDTH as usize).step_by(10).map(move |x| (x, y)))
+        .filter(|&(x, y)| at(x, y)[3] > 0).count();
+    format!("marker flipped to the bottom: {flipped}, {opaque} of 14400 sampled pixels drawn, rgba at (8,8) {:?}, \
+        (8,891) {:?}, (800,450) {:?}, (100,630) {:?}", at(8, 8), at(8, 891), at(800, 450), at(100, 630))
 }
