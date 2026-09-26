@@ -1,9 +1,11 @@
 # Wry backend: feasibility
 
 Phase 1 of the Wry add-on: can Wry's webview be drawn **inside** the game, into a texture the client's
-`BrowserRenderer` samples like it samples CEF's, and how. Every number below comes from the probe in
-[`prototype/`](../prototype), run locally and by the [Prototype workflow](../.github/workflows/prototype.yml)
-on GitHub's runners.
+`BrowserRenderer` samples like it samples CEF's, and how. Every number below comes from a probe that lived in
+`prototype/`, run locally and by a workflow on GitHub's runners.
+
+> Written before the add-on was built. The probe was removed once the add-on existed; the add-on follows the
+> recommendation at the end (macOS with the snapshot fallback).
 
 ## Short answer
 
@@ -20,7 +22,7 @@ Apple's paravirtual GPU). Frame rates below are therefore lower than on a real m
 against each other. Nothing here was measured inside the game yet: the probe stands in for it with its own GL
 context (Linux) or its own D3D11/Metal device.
 
-All tests: page size 1600×900, [test page](../prototype/page.html) animated every frame with a blurred
+All tests: page size 1600×900, a test page animated every frame with a blurred
 translucent panel, a red marker in the top left corner that the probe checks in the captured pixels, a
 transparent background whose alpha the probe checks, and a text field and button for the input check.
 
