@@ -9,7 +9,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSImage, NSResponder, NSScreen,
-    NSView, NSWindow, NSWindowDidBecomeKeyNotification, NSWindowStyleMask};
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidBecomeKeyNotification, NSWindowStyleMask};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGDataProvider, CGEvent, CGImage, CGImageByteOrderInfo, CGScrollEventUnit};
 use objc2_foundation::{NSDictionary, NSError, NSNotFound, NSNotificationCenter, NSNumber, NSObject, NSPoint, NSProcessInfo,
@@ -407,14 +407,28 @@ impl Browser {
                 kind, location, NSEventModifierFlags::empty(), Self::uptime(), number, None, 0, 1, 1.0)
         };
         match pointer {
+            Pointer::Move if self.buttons & 1 != 0 => {
+                if let Some(event) = event(NSEventType::LeftMouseDragged) {
+                    target.mouseDragged(&event);
+                }
+            }
             Pointer::Move => {
-                let kind = if self.buttons & 1 != 0 { NSEventType::LeftMouseDragged } else { NSEventType::MouseMoved };
-                if let Some(event) = event(kind) {
-                    if kind == NSEventType::LeftMouseDragged {
-                        target.mouseDragged(&event);
-                    } else {
-                        target.mouseMoved(&event);
+                let Some(event) = event(NSEventType::MouseMoved) else { return };
+                // WebKit takes moves from the owners of its tracking areas, as AppKit hands them out, not from the view
+                let mut owners: Vec<Retained<AnyObject>> = Vec::new();
+                for area in self.wk.trackingAreas().iter() {
+                    if !area.options().contains(NSTrackingAreaOptions::MouseMoved) {
+                        continue;
                     }
+                    let Some(owner) = area.owner() else { continue };
+                    if owners.iter().any(|known| Retained::as_ptr(known) == Retained::as_ptr(&owner)) {
+                        continue;
+                    }
+                    let responds: bool = unsafe { msg_send![&*owner, respondsToSelector: objc2::sel!(mouseMoved:)] };
+                    if responds {
+                        let _: () = unsafe { msg_send![&*owner, mouseMoved: &*event] };
+                    }
+                    owners.push(owner);
                 }
             }
             Pointer::Button(button, pressed) => {

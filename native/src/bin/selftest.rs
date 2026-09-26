@@ -111,6 +111,20 @@ impl Test {
         }
     }
 
+    /// Waits for a frame that shows what `ready` looks for, and returns the last one seen otherwise.
+    fn frame_where(&mut self, browser: BrowserId, width: u32, height: u32, ready: impl Fn(&Image) -> bool) -> Option<Image> {
+        let started = Instant::now();
+        let mut last = None;
+        while started.elapsed() < Duration::from_secs(10) {
+            let Some(image) = self.frame(browser, width, height) else { break };
+            if ready(&image) {
+                return Some(image);
+            }
+            last = Some(image);
+        }
+        last
+    }
+
     /// Waits for a frame of the given size, or a multiple of it on a screen that scales, as BGRA rows.
     fn frame(&mut self, browser: BrowserId, width: u32, height: u32) -> Option<Image> {
         let started = Instant::now();
@@ -321,13 +335,8 @@ fn main() {
     test.console(&format!("ready {width}x{height}"));
     test.wait_for("console warning", Duration::from_secs(5), |e| e.kind == EventKind::Console && e.code == 2);
 
-    if let Some(image) = test.frame(browser, width, height) {
-        // Let the page settle, then take the newest frame
-        let until = Instant::now() + Duration::from_millis(500);
-        while Instant::now() < until {
-            test.pump();
-        }
-        let image = test.frame(browser, width, height).unwrap_or(image);
+    let painted = |image: &Image| pixel(image, 10, 10) == [0, 0, 255, 255] && pixel(image, 500, 150)[3] > 0;
+    if let Some(image) = test.frame_where(browser, width, height, painted) {
         test.save("frame", &image);
         let marker = pixel(&image, 10, 10);
         test.check(marker == [0, 0, 255, 255], format!("marker pixel is red: {marker:?}"));
@@ -389,12 +398,7 @@ fn main() {
     // Half the texture at half the zoom keeps the layout
     test.engine.resize(browser, 400, 300, 0.5);
     test.console("resize 800x600");
-    if let Some(image) = test.frame(browser, 400, 300) {
-        let until = Instant::now() + Duration::from_millis(300);
-        while Instant::now() < until {
-            test.pump();
-        }
-        let image = test.frame(browser, 400, 300).unwrap_or(image);
+    if let Some(image) = test.frame_where(browser, 400, 300, |image| pixel(image, 20, 20) == [0, 0, 255, 255]) {
         test.save("resized", &image);
         let marker = pixel(&image, 20, 20);
         test.check(marker == [0, 0, 255, 255], format!("marker at half size: {marker:?}"));
