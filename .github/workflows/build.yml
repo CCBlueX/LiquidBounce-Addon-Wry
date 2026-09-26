@@ -28,6 +28,14 @@ jobs:
           - platform: windows-x64
             os: windows-2025
             library: liquidbounce_wry.dll
+          - platform: macos-arm64
+            os: macos-15
+            library: libliquidbounce_wry.dylib
+          # Built on the same runner, so not self-tested
+          - platform: macos-x64
+            os: macos-15
+            target: x86_64-apple-darwin
+            library: libliquidbounce_wry.dylib
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
@@ -42,24 +50,40 @@ jobs:
         working-directory: .
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libxkbcommon-dev
       - name: Update Rust
-        run: rustup update stable --no-self-update && rustup default stable
+        run: |
+          rustup update stable --no-self-update && rustup default stable
+          if [ -n "$TARGET" ]; then rustup target add "$TARGET"; fi
+        env:
+          TARGET: ${{ matrix.target }}
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
           key: ${{ matrix.platform }}
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked ${TARGET:+--target "$TARGET"}
+        env:
+          TARGET: ${{ matrix.target }}
       - name: Self-test
+        if: ${{ !matrix.target }}
         run: |
           set -o pipefail
           limit() { if command -v timeout >/dev/null; then timeout "$@"; else perl -e 'alarm shift; exec @ARGV' "$@"; fi; }
           mkdir -p selftest
-          limit 300 target/release/selftest selftest 2>&1 | tee selftest/log.txt
+          limit 300 target/release/selftest selftest/memory 2>&1 | tee selftest/memory.txt
+      # Frames that stay on the GPU: shared textures on Windows, IOSurfaces on macOS
+      - name: Self-test on the GPU
+        if: ${{ !matrix.target && runner.os != 'Linux' }}
+        run: |
+          set -o pipefail
+          limit() { if command -v timeout >/dev/null; then timeout "$@"; else perl -e 'alarm shift; exec @ARGV' "$@"; fi; }
+          limit 300 target/release/selftest selftest/gpu gpu 2>&1 | tee selftest/gpu.txt
       - name: Collect library
         run: |
           mkdir -p ../natives/${{ matrix.platform }}
-          cp target/release/${{ matrix.library }} ../natives/${{ matrix.platform }}/
+          cp target/${TARGET:+$TARGET/}release/${{ matrix.library }} ../natives/${{ matrix.platform }}/
+        env:
+          TARGET: ${{ matrix.target }}
       - name: Upload library
         uses: actions/upload-artifact@v7
         with:
