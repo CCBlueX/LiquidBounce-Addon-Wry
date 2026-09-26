@@ -164,10 +164,12 @@ internal class WryDmaBufImporter private constructor(
             }
 
             val capabilities = EGL.createDisplayCapabilities(display)
+            // LWJGL leaves the client extensions out of EGL.getCapabilities()
+            val clientExtensions = EGL14.eglQueryString(EGL14.EGL_NO_DISPLAY, EGL14.EGL_EXTENSIONS).orEmpty().split(' ')
             val missing = listOfNotNull(
                 "EGL_EXT_image_dma_buf_import".takeUnless { capabilities.EGL_EXT_image_dma_buf_import },
                 "EGL_KHR_image_base".takeUnless { capabilities.EGL_KHR_image_base },
-                "EGL_EXT_device_query".takeUnless { EGL.getCapabilities().EGL_EXT_device_query },
+                "EGL_EXT_device_query".takeUnless { "EGL_EXT_device_query" in clientExtensions },
                 "GL_EXT_EGL_image_storage".takeUnless { GL.getCapabilities().GL_EXT_EGL_image_storage }
             )
             if (missing.isNotEmpty()) {
