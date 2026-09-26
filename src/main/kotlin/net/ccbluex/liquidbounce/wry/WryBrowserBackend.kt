@@ -32,7 +32,7 @@ class WryBrowserBackend : BrowserBackend, EventListener {
     override var accelerationFlags = BrowserAccelerationFlags.UNSUPPORTED
     override val supportsIncognito = true
 
-    internal var dmaBufImporter: WryDmaBufImporter? = null
+    internal var gpuImporter: WryGpuImporter? = null
         private set
 
     override fun makeDependenciesAvailable(taskManager: TaskManager, whenAvailable: () -> Unit) {
@@ -57,8 +57,8 @@ class WryBrowserBackend : BrowserBackend, EventListener {
             return
         }
 
-        val importer = if (isBrowserAccelerationDisabled) null else WryDmaBufImporter.create()
-        dmaBufImporter = importer
+        val importer = if (isBrowserAccelerationDisabled) null else WryGpuImporter.create()
+        gpuImporter = importer
         runCatching {
             WryNative.start(
                 folder.resolve("data").absolutePath,
@@ -74,7 +74,7 @@ class WryBrowserBackend : BrowserBackend, EventListener {
         pollEvents()
         logger.info(
             if (importer != null) {
-                "Pages reach the game as dmabufs of ${importer.renderNode}"
+                "Pages stay on the GPU (${importer.javaClass.simpleName})"
             } else {
                 "Pages reach the game through memory"
             }
@@ -87,8 +87,8 @@ class WryBrowserBackend : BrowserBackend, EventListener {
             WryNative.stop()
             isInitialized = false
         }
-        dmaBufImporter?.close()
-        dmaBufImporter = null
+        gpuImporter?.close()
+        gpuImporter = null
     }
 
     override fun update() {
@@ -102,7 +102,7 @@ class WryBrowserBackend : BrowserBackend, EventListener {
             for (browser in browsers) {
                 browser.updateFrame()
             }
-            dmaBufImporter?.collect(browsers.mapNotNullTo(HashSet()) { it.shownBuffer })
+            gpuImporter?.collect(browsers.mapNotNullTo(HashSet()) { it.shownBuffer })
         } catch (e: Exception) {
             logger.error("Failed to update the browsers", e)
         }
@@ -118,7 +118,7 @@ class WryBrowserBackend : BrowserBackend, EventListener {
                     2 -> logger.warn(event.text)
                     else -> logger.error(event.text)
                 }
-                WryNative.EVENT_BUFFER_GONE -> dmaBufImporter?.forget(event.value)
+                WryNative.EVENT_BUFFER_GONE -> gpuImporter?.forget(event.value)
                 else -> browsers.firstOrNull { it.id == event.browser }?.onEvent(event)
             }
         }

@@ -56,7 +56,7 @@ class WryBrowser internal constructor(
     private var shown: BrowserTexture? = null
 
     /**
-     * The dmabuf the browser shows, which has to stay imported.
+     * The GPU buffer the browser shows, which has to stay imported.
      */
     internal var shownBuffer: Long? = null
         private set
@@ -189,22 +189,12 @@ class WryBrowser internal constructor(
                 stride = frame[2].toInt(),
                 bgra = frame[3] and 1L != 0L
             )
-            WryNative.FRAME_DMA_BUF -> {
-                val importer = backend.dmaBufImporter ?: return
-                val planes = frame[9].toInt()
-                val texture = importer.import(
-                    id = frame[6],
-                    fourcc = frame[7].toInt(),
-                    modifier = frame[8],
-                    width = frame[0].toInt(),
-                    height = frame[1].toInt(),
-                    fds = IntArray(planes) { frame[10 + it * 3].toInt() },
-                    offsets = IntArray(planes) { frame[11 + it * 3].toInt() },
-                    strides = IntArray(planes) { frame[12 + it * 3].toInt() }
-                ) ?: return
-                shownBuffer = frame[6]
+            WryNative.FRAME_DMA_BUF, WryNative.FRAME_SHARED_TEXTURE, WryNative.FRAME_IO_SURFACE -> {
+                val importer = backend.gpuImporter ?: return
+                val texture = importer.texture(frame) ?: return
+                shownBuffer = importer.id(frame)
                 shown = BrowserTexture(
-                    TextureSetup.singleTexture(texture, sampler), viewport.width, viewport.height, false
+                    TextureSetup.singleTexture(texture, sampler), viewport.width, viewport.height, importer.bgra
                 )
             }
         }

@@ -1,13 +1,6 @@
 package net.ccbluex.liquidbounce.wry
 
-import com.mojang.blaze3d.systems.RenderSystem
-import com.mojang.renderpearl.api.GpuFormat
-import com.mojang.renderpearl.api.textures.GpuTexture
-import com.mojang.renderpearl.api.textures.GpuTextureView
-import com.mojang.renderpearl.backend.opengl.FrameBufferCache
 import com.mojang.renderpearl.backend.opengl.GlStateManager
-import com.mojang.renderpearl.backend.opengl.GlTexture
-import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
 import org.apache.logging.log4j.LogManager
 import org.lwjgl.egl.EGL
 import org.lwjgl.egl.EGL14
@@ -23,60 +16,37 @@ import org.lwjgl.opengl.GL11
 import org.lwjgl.system.JNI
 import org.lwjgl.system.MemoryStack
 import org.lwjgl.system.MemoryUtil
-import org.lwjgl.system.Platform
 import java.nio.IntBuffer
 
 /**
  * Brings the dmabufs the web views on Linux draw into straight into textures of the game, through EGL.
  *
- * Only possible while the game renders with OpenGL on an EGL context of a GPU with a DRM render node. Every buffer is
- * imported once, the web view draws into the same few buffers over and over.
+ * Only possible while the game renders with OpenGL on an EGL context of a GPU with a DRM render node.
  */
 internal class WryDmaBufImporter private constructor(
     private val display: Long,
     private val capabilities: EGLCapabilities,
-    val renderNode: String,
-    val formats: LongArray
-) : AutoCloseable {
+    override val renderNode: String,
+    override val formats: LongArray
+) : WryGpuImporter() {
 
-    private class Imported(val texture: GpuTexture, val view: GpuTextureView, val width: Int, val height: Int) {
-        fun close() {
-            view.close()
-            texture.close()
-        }
-    }
+    // The EGL import already hands over the channels in order
+    override val bgra = false
 
-    private class ImportedGlTexture(id: Int, width: Int, height: Int) : GlTexture(
-        USAGE_TEXTURE_BINDING, "Wry dmabuf", GpuFormat.RGBA8_UNORM, width, height, 1, 1, id, FRAME_BUFFER_CACHE
-    )
+    override fun id(frame: LongArray) = frame[6]
 
-    private val logger = LogManager.getLogger("LiquidBounce/Wry")
-    private val imported = Long2ObjectOpenHashMap<Imported>()
-    private val gone = mutableListOf<Imported>()
-    private var hasFailed = false
-
-    /**
-     * The texture of a dmabuf, imported on first sight.
-     */
-    @Suppress("LongParameterList")
-    fun import(
-        id: Long,
-        fourcc: Int,
-        modifier: Long,
-        width: Int,
-        height: Int,
-        fds: IntArray,
-        offsets: IntArray,
-        strides: IntArray
-    ): GpuTextureView? {
-        imported[id]?.takeIf { it.width == width && it.height == height }?.let { return it.view }
-        imported.remove(id)?.let(gone::add)
-
-        val texture = createTexture(fourcc, modifier, width, height, fds, offsets, strides) ?: return null
-        val gpuTexture = ImportedGlTexture(texture, width, height)
-        val entry = Imported(gpuTexture, RenderSystem.getDevice().createTextureView(gpuTexture), width, height)
-        imported.put(id, entry)
-        return entry.view
+    override fun import(frame: LongArray, width: Int, height: Int): Imported? {
+        val planes = frame[9].toInt()
+        val texture = createTexture(
+            fourcc = frame[7].toInt(),
+            modifier = frame[8],
+            width = width,
+            height = height,
+            fds = IntArray(planes) { frame[10 + it * 3].toInt() },
+            offsets = IntArray(planes) { frame[11 + it * 3].toInt() },
+            strides = IntArray(planes) { frame[12 + it * 3].toInt() }
+        ) ?: return null
+        return wrap(texture, width, height)
     }
 
     @Suppress("LongParameterList")
@@ -130,41 +100,9 @@ internal class WryDmaBufImporter private constructor(
         texture
     }
 
-    private fun fail(message: String) {
-        if (!hasFailed) {
-            hasFailed = true
-            logger.error("A page's dmabuf could not be imported: $message")
-        }
-    }
-
-    /**
-     * A buffer the web view destroyed, its texture goes once no browser shows it anymore.
-     */
-    fun forget(id: Long) {
-        imported.remove(id)?.let(gone::add)
-    }
-
-    fun collect(shown: Set<Long>) {
-        if (gone.isEmpty()) {
-            return
-        }
-        val shownTextures = shown.mapNotNullTo(HashSet()) { imported[it] }
-        gone.removeAll { entry ->
-            (entry !in shownTextures).also { if (it) entry.close() }
-        }
-    }
-
-    override fun close() {
-        imported.values.forEach(Imported::close)
-        imported.clear()
-        gone.forEach(Imported::close)
-        gone.clear()
-    }
-
     companion object {
 
         private val logger = LogManager.getLogger("LiquidBounce/Wry")
-        private val FRAME_BUFFER_CACHE = FrameBufferCache()
 
         private const val DRM_FORMAT_MOD_INVALID = 0x00ffffffffffffffL
 
@@ -213,21 +151,6 @@ internal class WryDmaBufImporter private constructor(
          * An importer for the game's EGL context, or null when the game can't take dmabufs.
          */
         fun create(): WryDmaBufImporter? {
-            if (Platform.get() != Platform.LINUX) {
-                return null
-            }
-            val backend = RenderSystem.getDevice().deviceInfo.backendName()
-            if (!backend.contains("OpenGL", ignoreCase = true)) {
-                logger.info("The game renders with $backend, pages are copied through memory")
-                return null
-            }
-
-            return runCatching(::createForCurrentContext).onFailure {
-                logger.warn("dmabufs are not available, pages are copied through memory", it)
-            }.getOrNull()
-        }
-
-        private fun createForCurrentContext(): WryDmaBufImporter? {
             try {
                 EGL.getCapabilities()
             } catch (_: IllegalStateException) {

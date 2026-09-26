@@ -191,6 +191,14 @@ internal object WryNative {
     @JvmStatic
     external fun takeFrame(id: Long, out: LongArray): Int
 
+    /**
+     * macOS: binds an IOSurface to the rectangle texture bound on the game's OpenGL context.
+     *
+     * @return the CGL error, 0 for none
+     */
+    @JvmStatic
+    external fun bindIoSurface(surface: Long, width: Int, height: Int): Int
+
 }
 
 /**
