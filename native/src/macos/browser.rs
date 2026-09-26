@@ -61,7 +61,6 @@ type Queue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
 
 /// The page's layer tree rendered into an IOSurface.
 struct Layers {
-    device: Device,
     queue: Queue,
     surface: Retained<IOSurface>,
     texture: Retained<ProtocolObject<dyn MTLTexture>>,
@@ -87,9 +86,8 @@ pub struct Browser {
     pub fps: u32,
     last_frame: Option<Instant>,
     last_url: String,
+    gpu: Option<(Device, Queue)>,
     layers: Option<Layers>,
-    /// Whether WebKit hands out its layers, found out once the page has any.
-    remote_layers: Option<bool>,
     snapshot: Rc<RefCell<Snapshot>>,
     front: Option<Vec<u8>>,
     buttons: u32,
@@ -107,7 +105,7 @@ fn io_surface(width: u32, height: u32) -> Option<Retained<IOSurface>> {
 }
 
 impl Layers {
-    fn new(device: Device, queue: Queue, layer: &CALayer, width: u32, height: u32) -> Option<Self> {
+    fn new(device: &Device, queue: Queue, layer: &CALayer, width: u32, height: u32) -> Option<Self> {
         let surface = io_surface(width, height)?;
         let surface_ref: &IOSurfaceRef = unsafe { &*(Retained::as_ptr(&surface) as *const IOSurfaceRef) };
         let descriptor = unsafe {
@@ -124,7 +122,7 @@ impl Layers {
         };
         renderer.setLayer(Some(layer));
         renderer.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width as f64, height as f64)));
-        Some(Self { device, queue, surface, texture, renderer, fresh: false })
+        Some(Self { queue, surface, texture, renderer, fresh: false })
     }
 
     /// Draws what changed, returns whether anything did.
@@ -231,10 +229,6 @@ impl Browser {
         let delegate = NavigationDelegate::new(id, inner, mtm);
         unsafe { wk.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
 
-        let layers = gpu.and_then(|(device, queue)| {
-            let layer = wk.layer()?;
-            Layers::new(device, queue, &layer, width, height)
-        });
         Ok(Self {
             id,
             window,
@@ -246,8 +240,8 @@ impl Browser {
             fps: options.fps.max(1),
             last_frame: None,
             last_url: String::new(),
-            layers,
-            remote_layers: None,
+            gpu,
+            layers: None,
             snapshot: Rc::default(),
             front: None,
             buttons: 0,
@@ -271,21 +265,36 @@ impl Browser {
         }
         self.last_frame = Some(Instant::now());
 
-        if self.layers.is_some() && self.remote_layers.is_none() {
-            if let Some(layer) = self.wk.layer().filter(|layer| has_content(layer)) {
-                let remote = !hosts_remotely(&layer, 0);
-                if !remote {
-                    api::warn("WebKit shows the page through the window server, it is copied through memory");
-                    self.layers = None;
-                }
-                self.remote_layers = Some(remote);
-            }
-        }
+        self.follow_layer();
         match &mut self.layers {
             Some(layers) => {
                 layers.render(self.width, self.height);
             }
-            None => self.request_snapshot(mtm),
+            None if self.gpu.is_none() => self.request_snapshot(mtm),
+            None => {}
+        }
+    }
+
+    /// Points a renderer at the web view's layer once it has content, as one set up earlier never draws a frame, and
+    /// again whenever WebKit replaces the layer.
+    fn follow_layer(&mut self) {
+        let Some((device, queue)) = self.gpu.clone() else { return };
+        let Some(layer) = self.wk.layer().filter(|layer| has_content(layer)) else { return };
+        let current = self.layers.as_ref().and_then(|layers| layers.renderer.layer());
+        if current.is_some_and(|current| Retained::as_ptr(&current) == Retained::as_ptr(&layer)) {
+            return;
+        }
+        if let Some(old) = self.layers.take() {
+            gone(old.surface_id());
+        }
+        if hosts_remotely(&layer, 0) {
+            api::warn("WebKit shows the page through the window server, it is copied through memory");
+            self.gpu = None;
+            return;
+        }
+        self.layers = Layers::new(&device, queue, &layer, self.width, self.height);
+        if self.layers.is_none() {
+            self.gpu = None;
         }
     }
 
@@ -364,7 +373,6 @@ impl Browser {
 
         if let Some(old) = self.layers.take() {
             gone(old.surface_id());
-            self.layers = self.wk.layer().and_then(|layer| Layers::new(old.device, old.queue, &layer, width, height));
         }
     }
 
