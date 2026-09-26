@@ -1,7 +1,7 @@
 //! Drives the engine the way the game does and checks what comes back: `selftest [out dir]`.
 
 use liquidbounce_wry::api::{self, BrowserId, BrowserOptions, Event, EventKind, Frame, Key, MouseButton, Pointer,
-    StartOptions, MOD_CTRL};
+    StartOptions, MOD_CTRL, MOD_GUI};
 use liquidbounce_wry::Engine;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -21,7 +21,7 @@ html, body { margin: 0; background: transparent; font: 16px sans-serif; }
 <script>
 console.log(`ready ${innerWidth}x${innerHeight}`);
 text.addEventListener('input', () => console.log('input:' + text.value));
-addEventListener('keydown', (e) => console.log(`keydown:${e.key}:${e.code}:${e.ctrlKey ? 'ctrl' : ''}`));
+addEventListener('keydown', (e) => console.log(`keydown:${e.key}:${e.code}:${e.ctrlKey ? 'ctrl' : ''}${e.metaKey ? 'meta' : ''}`));
 addEventListener('mousedown', (e) => console.log(`mousedown:${e.button}:${e.clientX}:${e.clientY}`));
 addEventListener('wheel', (e) => console.log('wheel:' + Math.sign(e.deltaY)));
 addEventListener('resize', () => console.log(`resize ${innerWidth}x${innerHeight}`));
@@ -362,8 +362,10 @@ fn main() {
     test.key(browser, 8, 42, 0);
     test.console("keydown:Backspace:Backspace:");
     test.console("input:héllo wörl");
-    test.key(browser, 'a' as i32, 4, MOD_CTRL & 0x40);
-    test.console("keydown:a:KeyA:ctrl");
+    // Select all is Cmd+A on macOS, where Ctrl+A goes to the start of the line
+    let (select_all, name) = if cfg!(target_os = "macos") { (MOD_GUI & 0x400, "meta") } else { (MOD_CTRL & 0x40, "ctrl") };
+    test.key(browser, 'a' as i32, 4, select_all);
+    test.console(&format!("keydown:a:KeyA:{name}"));
     test.engine.text(browser, "x".into());
     test.console("input:x");
     test.key(browser, 0x4000_0050, 80, 0);

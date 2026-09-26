@@ -39,6 +39,9 @@ pub const INIT_SCRIPT: &str = r#"
         if (element.isContentEditable || element.matches('textarea, input:not([type=button], [type=submit], [type=reset], [type=checkbox], [type=radio], [type=range], [type=color], [type=file])')) return 'text';
         return 'default';
     };
+    // The page's own handlers still run; native menus can't be shown and would block the game on macOS
+    addEventListener('contextmenu', (event) => event.preventDefault(), { capture: true });
+
     let cursor = 'default';
     addEventListener('mousemove', (event) => {
         const next = cursorOf(event.target);

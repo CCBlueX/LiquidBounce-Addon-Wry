@@ -64,6 +64,14 @@ jobs:
         run: cargo build --release --locked ${TARGET:+--target "$TARGET"}
         env:
           TARGET: ${{ matrix.target }}
+      - name: Compare mouse moves
+        if: ${{ !matrix.target && runner.os == 'macOS' }}
+        continue-on-error: true
+        run: |
+          for variant in direct window cgevent entered; do
+            WRY_MAC_MOVE=$variant perl -e 'alarm shift; exec @ARGV' 120 target/release/selftest "moves-$variant" 2>&1 \
+              | grep -E 'cursor|mousedown|==' | sed "s/^/$variant: /" || true
+          done
       - name: Self-test
         if: ${{ !matrix.target }}
         run: |
@@ -84,6 +92,14 @@ jobs:
           cp target/${TARGET:+$TARGET/}release/${{ matrix.library }} ../natives/${{ matrix.platform }}/
         env:
           TARGET: ${{ matrix.target }}
+      # The libraries carry these crates, their licenses go into the jar next to them
+      - name: Collect licenses
+        if: matrix.platform == 'linux-x64'
+        run: |
+          curl -sSfL https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.2/cargo-about-0.9.2-x86_64-unknown-linux-musl.tar.gz | tar xz -C "$RUNNER_TEMP"
+          cargo fetch --locked
+          "$RUNNER_TEMP/cargo-about-0.9.2-x86_64-unknown-linux-musl/cargo-about" generate --locked --fail about.hbs \
+            -o ../natives/THIRD-PARTY-LICENSES.txt
       - name: Upload library
         uses: actions/upload-artifact@v7
         with:
@@ -124,7 +140,8 @@ jobs:
           set -euo pipefail
           JAR=$(find build/libs -name '*.jar' -not -name '*-sources.jar' | head -n1)
           unzip -l "$JAR" | grep 'natives/'
-          [ "$(unzip -l "$JAR" | grep -c 'natives/.*liquidbounce_wry')" = "$(find natives -type f | wc -l)" ]
+          [ "$(unzip -l "$JAR" | grep -c 'natives/.*liquidbounce_wry')" = "$(find natives -name '*liquidbounce_wry*' | wc -l)" ]
+          unzip -l "$JAR" | grep -q 'natives/THIRD-PARTY-LICENSES.txt'
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7

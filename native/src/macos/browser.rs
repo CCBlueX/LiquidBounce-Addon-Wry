@@ -11,7 +11,8 @@ use objc2::{define_class, msg_send, AllocAnyThread, MainThreadMarker, MainThread
 use objc2_app_kit::{NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSImage, NSResponder, NSScreen,
     NSView, NSWindow, NSWindowStyleMask};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGDataProvider, CGEvent, CGImage, CGImageByteOrderInfo, CGScrollEventUnit};
+use objc2_core_graphics::{CGDataProvider, CGEvent, CGEventType, CGImage, CGImageByteOrderInfo, CGMouseButton,
+    CGScrollEventUnit};
 use objc2_foundation::{NSDictionary, NSError, NSNotFound, NSNumber, NSObject, NSPoint, NSProcessInfo, NSRange, NSRect, NSSize,
     NSString};
 use objc2_io_surface::{IOSurface, IOSurfacePropertyKey, IOSurfacePropertyKeyBytesPerElement,
@@ -93,6 +94,7 @@ pub struct Browser {
     snapshot: Rc<RefCell<Snapshot>>,
     front: Option<Vec<u8>>,
     buttons: u32,
+    entered: bool,
 }
 
 fn io_surface(width: u32, height: u32) -> Option<Retained<IOSurface>> {
@@ -243,6 +245,7 @@ impl Browser {
             snapshot: Rc::default(),
             front: None,
             buttons: 0,
+            entered: false,
         })
     }
 
@@ -377,6 +380,13 @@ impl Browser {
         flags
     }
 
+    /// A point of the page in screen coordinates from the top left, where the window sits.
+    fn screen_point(&self, x: f64, y: f64) -> CGPoint {
+        let frame = self.window.frame();
+        let screen_top = NSScreen::mainScreen(self.window.mtm()).map_or(0.0, |screen| screen.frame().size.height);
+        CGPoint::new(frame.origin.x + x, screen_top - (frame.origin.y + frame.size.height) + y)
+    }
+
     fn uptime() -> f64 {
         NSProcessInfo::processInfo().systemUptime()
     }
@@ -394,8 +404,30 @@ impl Browser {
         match pointer {
             Pointer::Move => {
                 let kind = if self.buttons & 1 != 0 { NSEventType::LeftMouseDragged } else { NSEventType::MouseMoved };
-                if let Some(event) = event(kind) {
-                    if kind == NSEventType::LeftMouseDragged {
+                let variant = std::env::var("WRY_MAC_MOVE").unwrap_or_default();
+                if variant == "entered" && !self.entered {
+                    self.entered = true;
+                    let entered = unsafe {
+                        NSEvent::enterExitEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_trackingNumber_userData(
+                            NSEventType::MouseEntered, location, NSEventModifierFlags::empty(), Self::uptime(), number, None,
+                            0, 0, std::ptr::null_mut())
+                    };
+                    if let Some(entered) = entered {
+                        target.mouseEntered(&entered);
+                    }
+                }
+                let event = if variant == "cgevent" {
+                    let screen = self.screen_point(x, y);
+                    CGEvent::new_mouse_event(None, CGEventType::MouseMoved, screen, CGMouseButton::Left)
+                        .and_then(|cg| NSEvent::eventWithCGEvent(&cg))
+                } else {
+                    event(kind)
+                };
+                if let Some(event) = event {
+                    if variant == "window" {
+                        self.window.setAcceptsMouseMovedEvents(true);
+                        self.window.sendEvent(&event);
+                    } else if kind == NSEventType::LeftMouseDragged {
                         target.mouseDragged(&event);
                     } else {
                         target.mouseMoved(&event);
@@ -429,11 +461,7 @@ impl Browser {
             Pointer::Scroll(steps) => {
                 let Some(scroll) = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1,
                     steps.round() as i32, 0, 0) else { return };
-                // In screen coordinates from the top left, where the window sits
-                let frame = self.window.frame();
-                let screen_top = NSScreen::mainScreen(self.window.mtm()).map_or(0.0, |screen| screen.frame().size.height);
-                let origin = CGPoint::new(frame.origin.x, screen_top - (frame.origin.y + frame.size.height));
-                CGEvent::set_location(Some(&scroll), CGPoint::new(origin.x + x, origin.y + y));
+                CGEvent::set_location(Some(&scroll), self.screen_point(x, y));
                 if let Some(event) = NSEvent::eventWithCGEvent(&scroll) {
                     target.scrollWheel(&event);
                 }
