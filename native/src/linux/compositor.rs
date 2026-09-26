@@ -282,6 +282,9 @@ impl CompositorHandler for State {
                     replaced.buffer.release();
                 }
             }
+            if let Some(old) = slot.shm.take() {
+                slot.spare = Some(old.data);
+            }
             return;
         }
 
@@ -305,6 +308,9 @@ impl CompositorHandler for State {
                 stride: data.stride as u32,
             }) {
                 slot.spare = Some(old.data);
+            }
+            if let Some(old) = slot.dmabuf.take() {
+                old.buffer.release();
             }
         });
         if copied.is_err() {

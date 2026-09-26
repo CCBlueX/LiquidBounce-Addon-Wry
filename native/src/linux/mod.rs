@@ -28,6 +28,7 @@ struct DmaBufFrame {
     dmabuf: Dmabuf,
 }
 
+/// Only the newest frame waits for the game, in memory or as a dmabuf.
 #[derive(Default)]
 struct BrowserSlot {
     /// The newest frame the game didn't take yet.
@@ -179,6 +180,9 @@ impl Engine {
         }
 
         let frame = slot.shm.take()?;
+        if let Some(previous) = slot.shown.take() {
+            self.compositor.send(Command::Release(previous.buffer));
+        }
         if let Some(previous) = slot.front.replace(frame) {
             slot.spare.get_or_insert(previous.data);
         }
