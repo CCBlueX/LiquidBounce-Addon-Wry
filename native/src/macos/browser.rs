@@ -9,12 +9,11 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSImage, NSResponder, NSScreen,
-    NSView, NSWindow, NSWindowStyleMask};
+    NSView, NSWindow, NSWindowDidBecomeKeyNotification, NSWindowStyleMask};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGDataProvider, CGEvent, CGEventType, CGImage, CGImageByteOrderInfo, CGMouseButton,
-    CGScrollEventUnit};
-use objc2_foundation::{NSDictionary, NSError, NSNotFound, NSNumber, NSObject, NSPoint, NSProcessInfo, NSRange, NSRect, NSSize,
-    NSString};
+use objc2_core_graphics::{CGDataProvider, CGEvent, CGImage, CGImageByteOrderInfo, CGScrollEventUnit};
+use objc2_foundation::{NSDictionary, NSError, NSNotFound, NSNotificationCenter, NSNumber, NSObject, NSPoint, NSProcessInfo,
+    NSRange, NSRect, NSSize, NSString};
 use objc2_io_surface::{IOSurface, IOSurfacePropertyKey, IOSurfacePropertyKeyBytesPerElement,
     IOSurfacePropertyKeyHeight, IOSurfacePropertyKeyPixelFormat, IOSurfacePropertyKeyWidth, IOSurfaceRef};
 use objc2_metal::{MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLLoadAction,
@@ -94,7 +93,6 @@ pub struct Browser {
     snapshot: Rc<RefCell<Snapshot>>,
     front: Option<Vec<u8>>,
     buttons: u32,
-    entered: bool,
 }
 
 fn io_surface(width: u32, height: u32) -> Option<Retained<IOSurface>> {
@@ -221,6 +219,14 @@ impl Browser {
         let wk: Retained<WKWebView> = Retained::into_super(webview.webview());
         unsafe { wk.setPageZoom(options.zoom) };
 
+        // WebKit only hovers and moves the mouse in pages it thinks are active: those of the key window's first
+        // responder. The window reports itself as key; WebKit is told so once, as it never becomes key for real.
+        window.makeFirstResponder(Some(&wk));
+        unsafe {
+            NSNotificationCenter::defaultCenter()
+                .postNotificationName_object(NSWindowDidBecomeKeyNotification, Some(&window));
+        }
+
         let inner = unsafe { wk.navigationDelegate() }.ok_or("Wry set no navigation delegate")?;
         let delegate = NavigationDelegate::new(id, inner, mtm);
         unsafe { wk.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
@@ -245,7 +251,6 @@ impl Browser {
             snapshot: Rc::default(),
             front: None,
             buttons: 0,
-            entered: false,
         })
     }
 
@@ -404,30 +409,8 @@ impl Browser {
         match pointer {
             Pointer::Move => {
                 let kind = if self.buttons & 1 != 0 { NSEventType::LeftMouseDragged } else { NSEventType::MouseMoved };
-                let variant = std::env::var("WRY_MAC_MOVE").unwrap_or_default();
-                if variant == "entered" && !self.entered {
-                    self.entered = true;
-                    let entered = unsafe {
-                        NSEvent::enterExitEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_trackingNumber_userData(
-                            NSEventType::MouseEntered, location, NSEventModifierFlags::empty(), Self::uptime(), number, None,
-                            0, 0, std::ptr::null_mut())
-                    };
-                    if let Some(entered) = entered {
-                        target.mouseEntered(&entered);
-                    }
-                }
-                let event = if variant == "cgevent" {
-                    let screen = self.screen_point(x, y);
-                    CGEvent::new_mouse_event(None, CGEventType::MouseMoved, screen, CGMouseButton::Left)
-                        .and_then(|cg| NSEvent::eventWithCGEvent(&cg))
-                } else {
-                    event(kind)
-                };
-                if let Some(event) = event {
-                    if variant == "window" {
-                        self.window.setAcceptsMouseMovedEvents(true);
-                        self.window.sendEvent(&event);
-                    } else if kind == NSEventType::LeftMouseDragged {
+                if let Some(event) = event(kind) {
+                    if kind == NSEventType::LeftMouseDragged {
                         target.mouseDragged(&event);
                     } else {
                         target.mouseMoved(&event);

@@ -296,9 +296,6 @@ fn main() {
         let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
-        if std::env::var_os("WRY_ACTIVATE").is_some() {
-            app.activate();
-        }
     }
     let base = serve();
     let data_dir = std::env::temp_dir().join(format!("liquidbounce-wry-selftest-{}", std::process::id()));
@@ -376,6 +373,10 @@ fn main() {
     test.console("input:x");
     test.key(browser, 0x4000_0050, 80, 0);
     test.console("keydown:ArrowLeft:ArrowLeft:");
+    // A numpad digit comes as a key and as text, and must only be typed once
+    test.key(browser, 0x4000_0059, 89, 0);
+    test.engine.text(browser, "1".into());
+    test.console("input:1x");
 
     test.input(browser, Pointer::Scroll(1.0), 400.0, 300.0);
     test.console("wheel:-1");

@@ -290,6 +290,11 @@ fn send_key(browser: &Browser, key: &Key) {
             None => return,
         },
     };
+    // Keys that type, the numpad's among them, reach the page as text
+    let typed = unsafe { char::from_u32(gtk::gdk::ffi::gdk_keyval_to_unicode(keyval)) };
+    if key.modifiers & (MOD_CTRL | MOD_ALT | MOD_GUI) == 0 && typed.is_some_and(|c| c != '\0' && !c.is_control()) {
+        return;
+    }
     let Some(window) = browser.window.window() else { return };
 
     unsafe {

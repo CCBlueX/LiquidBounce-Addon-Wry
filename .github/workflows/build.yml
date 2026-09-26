@@ -64,17 +64,6 @@ jobs:
         run: cargo build --release --locked ${TARGET:+--target "$TARGET"}
         env:
           TARGET: ${{ matrix.target }}
-      - name: Compare mouse moves
-        if: ${{ !matrix.target && runner.os == 'macOS' }}
-        continue-on-error: true
-        run: |
-          for variant in direct window; do
-            for activate in "" 1; do
-              WRY_ACTIVATE=$activate WRY_MAC_MOVE=$variant perl -e 'alarm shift; exec @ARGV' 120 target/release/selftest \
-                "moves-$variant$activate" 2>&1 | grep -E 'active|mousemove|cursor|KeyA|input:|==' \
-                | sed "s/^/$variant${activate:+ activated}: /" || true
-            done
-          done
       - name: Self-test
         if: ${{ !matrix.target }}
         run: |
