@@ -395,10 +395,11 @@ fn main() {
     test.input(browser, Pointer::Button(MouseButton::Right, false), 200.0, 200.0);
     test.console("mousedown:2:200:200");
 
-    // Half the texture at half the zoom keeps the layout
+    // Half the texture at half the zoom keeps the layout, once a frame painted at the new zoom arrives
     test.engine.resize(browser, 400, 300, 0.5);
     test.console("resize 800x600");
-    if let Some(image) = test.frame_where(browser, 400, 300, |image| pixel(image, 20, 20) == [0, 0, 255, 255]) {
+    let zoomed = |image: &Image| pixel(image, 20, 20) == [0, 0, 255, 255] && pixel(image, 40, 40)[3] == 0;
+    if let Some(image) = test.frame_where(browser, 400, 300, zoomed) {
         test.save("resized", &image);
         let marker = pixel(&image, 20, 20);
         test.check(marker == [0, 0, 255, 255], format!("marker at half size: {marker:?}"));
