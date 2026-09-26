@@ -30,19 +30,20 @@ thread_local! {
 }
 
 pub struct Gtk {
-    thread: Option<std::thread::JoinHandle<()>>,
+    stopped: mpsc::Receiver<()>,
 }
 
 impl Gtk {
     pub fn start(socket: &Path, data_dir: PathBuf) -> api::Result<Self> {
         let socket = socket.to_path_buf();
         let (ready_tx, ready_rx) = mpsc::channel();
-        let thread = std::thread::Builder::new()
+        let (stopped_tx, stopped) = mpsc::channel();
+        std::thread::Builder::new()
             .name("wry-gtk".into())
-            .spawn(move || run(socket, data_dir, ready_tx))
+            .spawn(move || run(socket, data_dir, ready_tx, stopped_tx))
             .map_err(|e| e.to_string())?;
         ready_rx.recv_timeout(Duration::from_secs(20)).map_err(|_| "GTK did not start".to_string())??;
-        Ok(Self { thread: Some(thread) })
+        Ok(Self { stopped })
     }
 
     /// Runs `task` on the GTK thread.
@@ -133,26 +134,20 @@ impl Gtk {
     }
 
     pub fn stop(&mut self) {
-        let (done_tx, done_rx) = mpsc::channel();
-        Self::run(move |state| {
+        Self::run(|state| {
             for (_, browser) in state.browsers.drain() {
                 drop(browser.webview);
                 browser.window.close();
             }
             gtk::main_quit();
-            done_tx.send(()).ok();
         });
-        if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+        if self.stopped.recv_timeout(Duration::from_secs(5)).is_err() {
             api::warn("GTK did not stop in time");
-            return;
-        }
-        if let Some(thread) = self.thread.take() {
-            thread.join().ok();
         }
     }
 }
 
-fn run(socket: PathBuf, data_dir: PathBuf, ready: mpsc::Sender<api::Result<()>>) {
+fn run(socket: PathBuf, data_dir: PathBuf, ready: mpsc::Sender<api::Result<()>>, stopped: mpsc::Sender<()>) {
     // GTK only talks to the private compositor, whatever display the game uses
     gtk::gdk::set_allowed_backends("wayland");
     let args = ["liquidbounce", "--display", &socket.to_string_lossy()].map(|arg| CString::new(arg).unwrap());
@@ -175,6 +170,11 @@ fn run(socket: PathBuf, data_dir: PathBuf, ready: mpsc::Sender<api::Result<()>>)
     ready.send(Ok(())).ok();
     gtk::main();
     STATE.with(|state| state.borrow_mut().take());
+    stopped.send(()).ok();
+    // WebKit deadlocks tearing down its run loop when the thread it started on exits
+    loop {
+        std::thread::park();
+    }
 }
 
 impl State {
