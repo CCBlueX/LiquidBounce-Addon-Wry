@@ -3,7 +3,7 @@
 use crate::common::*;
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::*;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -200,6 +200,7 @@ fn carenderer(app: &NSApplication, window: &ProbeWindow, wk: &WKWebView, mode: &
     renderer.setLayer(Some(&layer));
     renderer.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(WIDTH as f64, HEIGHT as f64)));
 
+    let wait_budget = mode.ends_with("-wait").then_some(Duration::from_millis(4));
     let mut cpu_start = None;
     let mut last_fps_sample = Instant::now();
     let mut attempts = 0u64;
@@ -207,12 +208,18 @@ fn carenderer(app: &NSApplication, window: &ProbeWindow, wk: &WKWebView, mode: &
         let frame_start = Instant::now();
         pump(app);
 
+        if let Some(budget) = wait_budget {
+            wait_for_webkit(budget);
+        }
+
         let started = Instant::now();
         unsafe { renderer.beginFrameAtTime_timeStamp(CACurrentMediaTime(), std::ptr::null_mut()) };
         let dirty = renderer.updateBounds();
         let changed = dirty.size.width > 0.0 && dirty.size.height > 0.0;
         if changed {
-            renderer.addUpdateRect(dirty);
+            // CARenderer draws over what the texture holds, so transparent parts would keep old frames
+            clear(&*queue, &*texture);
+            renderer.addUpdateRect(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(WIDTH as f64, HEIGHT as f64)));
             renderer.render();
         }
         renderer.endFrame();
@@ -403,4 +410,27 @@ fn describe(pixels: &[u8], stride: usize) -> String {
         .filter(|&(x, y)| at(x, y)[3] > 0).count();
     format!("marker flipped to the bottom: {flipped}, {opaque} of 14400 sampled pixels drawn, rgba at (8,8) {:?}, \
         (8,891) {:?}, (800,450) {:?}, (100,630) {:?}", at(8, 8), at(8, 891), at(800, 450), at(100, 630))
+}
+
+fn clear(queue: &ProtocolObject<dyn MTLCommandQueue>, texture: &ProtocolObject<dyn MTLTexture>) {
+    let pass = MTLRenderPassDescriptor::renderPassDescriptor();
+    let attachment = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
+    attachment.setTexture(Some(texture));
+    attachment.setLoadAction(MTLLoadAction::Clear);
+    attachment.setStoreAction(MTLStoreAction::Store);
+    attachment.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0 });
+    let buffer = queue.commandBuffer().expect("command buffer");
+    if let Some(encoder) = buffer.renderCommandEncoderWithDescriptor(&pass) {
+        encoder.endEncoding();
+    }
+    buffer.commit();
+}
+
+/// Lets WebKit's main-thread work for the next frame arrive within this frame instead of the next one.
+fn wait_for_webkit(budget: Duration) {
+    let mode = unsafe { objc2_core_foundation::kCFRunLoopDefaultMode };
+    let until = Instant::now() + budget;
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        objc2_core_foundation::CFRunLoop::run_in_mode(mode, left.as_secs_f64(), true);
+    }
 }

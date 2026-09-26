@@ -18,9 +18,9 @@ jobs:
           - os: windows-2025
             modes: visual preview
           - os: macos-15
-            modes: carenderer-rlt carenderer-rlt-offscreen snapshot snapshot-rlt
+            modes: carenderer-rlt carenderer-rlt-wait snapshot
           - os: macos-26
-            modes: carenderer-alpha carenderer-rlt carenderer-rlt-offscreen snapshot-rlt
+            modes: carenderer-alpha carenderer-rlt carenderer-rlt-wait snapshot
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:
