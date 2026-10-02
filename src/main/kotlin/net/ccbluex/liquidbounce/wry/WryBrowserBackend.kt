@@ -2,16 +2,18 @@ package net.ccbluex.liquidbounce.wry
 
 import net.ccbluex.liquidbounce.config.ConfigSystem
 import net.ccbluex.liquidbounce.event.EventListener
-import net.ccbluex.liquidbounce.integration.backend.BrowserAccelerationFlags
 import net.ccbluex.liquidbounce.integration.backend.BrowserBackend
 import net.ccbluex.liquidbounce.integration.backend.browser.BrowserSettings
 import net.ccbluex.liquidbounce.integration.backend.browser.BrowserViewport
 import net.ccbluex.liquidbounce.integration.backend.input.InputAcceptor
-import net.ccbluex.liquidbounce.integration.backend.isBrowserAccelerationDisabled
 import net.ccbluex.liquidbounce.integration.task.TaskManager
+import net.ccbluex.liquidbounce.utils.client.env
 import net.ccbluex.liquidbounce.utils.client.error.ErrorHandler
 import net.ccbluex.liquidbounce.utils.kotlin.sortedInsert
 import org.apache.logging.log4j.LogManager
+
+private val isBrowserAccelerationDisabled = env("LB_BROWSER_DISABLE_ACCELERATION",
+    "net.ccbluex.liquidbounce.browser.disableAcceleration")?.toBoolean() ?: false
 
 /**
  * Shows the client's pages in the web view of the system: WebView2 on Windows, WKWebView on macOS and WebKitGTK on
@@ -27,9 +29,6 @@ class WryBrowserBackend : BrowserBackend, EventListener {
     override var isInitialized = false
         private set
     override val browsers = mutableListOf<WryBrowser>()
-
-    // The GPU path is picked once when starting, the setting of the client can't switch it per browser
-    override var accelerationFlags = BrowserAccelerationFlags.UNSUPPORTED
     override val supportsIncognito = true
 
     internal var gpuImporter: WryGpuImporter? = null
