@@ -21,13 +21,13 @@ cairo = { version = "0.18", package = "cairo-rs" }
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
 smithay = { version = "0.7", default-features = false, features = ["wayland_frontend"] }
 libc = "0.2"
-png = "0.17"
+png = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 webview2-com = "0.39"
 windows-core = "0.62"
 windows-numerics = "0.3"
-png = "0.17"
+png = "0.18"
 windows = { version = "0.62", features = [
     "Foundation",
     "Graphics",
@@ -65,7 +65,7 @@ objc2-io-surface = "0.3"
 objc2-core-foundation = "0.3"
 objc2-core-graphics = "0.3"
 raw-window-handle = "0.6"
-png = "0.17"
+png = "0.18"
 
 [profile.release]
 lto = true
