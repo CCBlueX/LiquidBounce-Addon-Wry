@@ -38,7 +38,7 @@ class WryGameTest : FabricClientGameTest {
         check(BrowserBackendManager.backend is WryBrowserBackend) {
             "The client uses ${BrowserBackendManager.backend} instead of Wry"
         }
-        context.waitFor({ ScreenManager.mainBrowser?.texture != null }, 20 * 60)
+        context.waitFor({ ScreenManager.mainBrowser?.texture != null && it.gui.overlay() == null }, 20 * 60)
         context.waitTicks(60)
         context.takeScreenshot("Title")
 
