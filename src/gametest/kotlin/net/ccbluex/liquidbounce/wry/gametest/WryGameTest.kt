@@ -7,11 +7,12 @@ import net.ccbluex.liquidbounce.integration.backend.browser.BrowserState
 import net.ccbluex.liquidbounce.integration.screen.CustomScreenType
 import net.ccbluex.liquidbounce.integration.screen.ScreenManager
 import net.ccbluex.liquidbounce.integration.theme.ThemeManager
+import net.ccbluex.liquidbounce.render.splash.Splash
+import net.ccbluex.liquidbounce.render.splash.SplashTimeline
 import net.ccbluex.liquidbounce.wry.WryBrowserBackend
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext
 import net.minecraft.client.Minecraft
-import net.minecraft.client.gui.components.Button
 import net.minecraft.client.gui.screens.TitleScreen
 
 /**
@@ -23,13 +24,13 @@ class WryGameTest : FabricClientGameTest {
     override fun runTest(context: ClientGameTestContext) {
         context.input.resizeWindow(1600, 900)
 
-        context.waitFor({ it.gui.screen() is BrowserSelectionScreen }, 20 * 120)
+        // The selection takes keys once its text shows
+        context.waitFor({ it.gui.screen() is BrowserSelectionScreen && Splash.isSettled(SplashTimeline.Phase.CHOICE) }, 20 * 120)
         context.waitTicks(20)
         context.takeScreenshot("Selection")
 
-        context.client { client ->
-            val screen = client.gui.screen() as BrowserSelectionScreen
-            screen.setFocused(screen.children().filterIsInstance<Button>().single { it.message.string == "Wry" })
+        repeat(BrowserBackendManager.selectableBackends.indexOfFirst { it.name == "Wry" }) {
+            context.input.pressKey(InputConstants.KEY_DOWN)
         }
         context.input.pressKey(InputConstants.KEY_RETURN)
 
